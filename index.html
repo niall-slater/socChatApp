@@ -1,0 +1,272 @@
+<!doctype html>
+<html>
+    <head>
+        <title>SocChat</title>
+        <style>
+            
+            body { font: 13px Helvetica, Arial; display: flex; background-color: #ededed}
+            
+            .mainWrapper {width: 80%; flex-wrap: nowrap; flex-direction: column;}
+            .sideBarWrapper {width: 16%;}
+            
+            .topBox {padding: 3px;}
+            .bottomBox {padding: 3px; bottom: 1px;}
+            
+            form { display: inline-flex;}
+            input { border: 2px solid rgb(209, 209, 209); border-radius: 4px; margin-right: 2px; padding: 10px;}
+            button { padding: 3px; background: #a8fde3; border: 2px solid rgba(204, 204, 204, 0.98); padding: 10px; border-radius: 4px; }
+            
+            .userListContainer { padding: 0px 5px; background-color: #ffffff; top: 0px; border-radius: 2px; border: 2px solid #e6e6e6; word-wrap: break-word; font-size: .8em;}
+            .userListContainer ul {padding-left: 12px;}
+            .userList li {}
+            .userList li:nth-child(odd) { background: #ddd;}
+            
+            #messages { list-style-type: none; margin-left: 0; padding-left: 1%; padding-bottom: 0px; overflow: auto; max-height: 75vh;}
+            #messages li { padding: 5px 1px; word-wrap: break-word;;}
+            #messages li:nth-child(odd) { background: #ffffff; }
+            #messages img {margin: 2px; max-width: 400px; padding: 8px; background-color: rgba(222, 222, 222, 0.9);}
+            
+            /* Quick hacky workaround to ensure the text field stays visible. I'm a busy man! */
+            @media only screen and (max-height: 500px) {
+                
+                #messages { max-height: 70vh;}
+            }
+            @media only screen and (max-height: 400px) {
+                
+                #messages { max-height: 65vh;}
+            }
+            @media only screen and (max-height: 300px) {
+                
+                #messages { max-height: 50vh;}
+            }
+            @media only screen and (max-height: 200px) {
+                
+                #messages { max-height: 45vh;}
+            }
+        </style>
+    </head>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://code.jquery.com/jquery-1.11.1.js"></script>
+    <script>
+        
+        /* CLIENTSIDE CHAT SCRIPT */
+        
+        var username = 'Guest-' + Math.floor(Math.random()*99);
+        
+		$(function () {
+            
+            /* Set up desktop notifications */
+            
+            if (!Notification) {
+                alert('Desktop notifications not available in your browser.'); 
+                return;
+            }
+
+            if (Notification.permission !== "granted")
+                Notification.requestPermission();
+        
+            /* Set up event handlers for drag-and-drop image upload */
+            
+            let dropArea = document.getElementById('messages');
+
+            dropArea.addEventListener('drop', handleDrop, false);
+            
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, preventDefaults, false)
+            });
+            
+            function preventDefaults (e) {
+                e.preventDefault()
+                e.stopPropagation()
+            }
+
+            dropArea.addEventListener('dragover', handleDrag, false);
+        
+            function handleDrop(e) {
+                let dt = e.dataTransfer;
+                let files = dt.files;
+
+                var data = files[0];
+                readThenSendFile(data);      
+            }
+
+            function handleDrag(e) {
+
+            }
+            
+            /* Set up websockets and message events */
+            
+			var socket = io();
+            
+            socket.emit('name init', username);
+            
+            //Check to see if we've already got a username from a previous session
+			if (getCookie('socChat_name') != null) {
+                username = getCookie('socChat_name');
+				socket.emit('name load', username);
+			}
+            
+			$('#messageForm').submit(function() {
+				socket.emit('chat message', $('#m').val());
+				$('#m').val('');
+				return false;
+			});
+            
+			$('#nameForm').submit(function() {
+                username = $('#n').val();
+				socket.emit('name change', username);
+				document.cookie = "socChat_name=" + username + ";expires=Wed, 1 Jan 2031 ;";
+				$('#n').val('');
+				return false;
+			});
+            
+			socket.on('chat message', function(msg) {
+				$('#messages').append($('<li>').text(msg));
+                notify('New message', msg);
+                scrollToBottom();
+			});
+            
+            //Clear and repopulate user list
+			socket.on('refresh list', function(people) { 
+                
+				$('#userList').empty();
+				
+                for (var key in people) {
+                    var value = people[key];
+                    
+                   $('#userList').append('<li id=\"' + value + '\">' + value);
+                }
+			});
+            
+            //Populate the chat window with messages from before we connected
+			socket.on('populate messages', function(history) {
+				for (var i = 0; i < history.length; i++) {
+                    if (typeof history[i] == 'string') {
+				        $('#messages').append($('<li>').text(history[i]));
+                    } else if (typeof history[i] == 'object') {
+                        $('#messages').append($('<li>').text(history[i].username + " sent an image:"));
+                        $('#messages').append($('<img>',{id:history[i].fileName,src:history[i].file}));
+                    }
+                }
+                scrollToBottom();
+			});
+            
+            //Send file on upload
+            $('#uploadFile').bind('change', function(e) {
+                console.log("Sending file");
+                var data = e.originalEvent.target.files[0];
+                readThenSendFile(data);      
+            });
+            
+            socket.on('base64 file', function(msg) {
+                console.log("Received file " + msg.fileName + " from " + msg.username);
+                $('#messages').append($('<li>').text(msg.username + " sent an image:"));
+                $('#messages').append($('<img>',{id:msg.fileName,src:msg.file}));
+                notify('New message', msg.username + " sent an image.");
+                scrollToBottom();
+            });
+            
+            function readThenSendFile(data) {
+
+                var reader = new FileReader();
+
+                reader.onload = function(evt){
+                    //Callback for when the file has been loaded
+                    var msg = {};
+                    msg.username = username;
+                    msg.file = evt.target.result;
+                    msg.fileName = data.name;
+                    socket.emit('base64 file', msg);
+                };
+
+                reader.readAsDataURL(data);
+            }
+            
+            function scrollToBottom() {
+                var el = document.getElementById("messages");
+                el.scrollTop = el.scrollHeight;
+            }
+        
+            /* HELPER FUNCTIONS */
+
+            function getCookie(name) {
+                var value = "; " + document.cookie;
+                var parts = value.split("; " + name + "=");
+                if (parts.length == 2) return parts.pop().split(";").shift();
+            }
+
+            function notify(title, msg) {
+                
+                if (Notification.permission !== "granted") {
+                    //Permission will usually be denied because we're not using SSL, so use the legacy method
+                }
+                else {
+                    var notification = new Notification(title, {
+                    icon: getRandomIconURL(),
+                    body: msg,  
+                    });
+
+                    notification.onclick = function () {
+                        window.focus();
+                    };
+                    setTimeout(function() {
+                        notification.close();
+                    }, '2500');
+                    return;
+                }
+                
+                console.log("Trying legacy notification");
+                
+                var legacyNotification = new Notification(title, { icon: getRandomIconURL, body: msg})
+                legacyNotification.onshow = function() { setTimeout(legacyNotification.close, 2500) }
+                
+                console.log(legacyNotification);
+            }
+
+            function getRandomIconURL() {
+                var rand = Math.random();
+
+                if (rand > 0.7) {
+                    return "https://i.imgur.com/mC6CFeC.png";
+                }
+                if (rand > 0.5) {
+                    return "https://i.imgur.com/Aa4yqC0.png";
+                }
+                else {
+                    return "https://i.imgur.com/6Fl6z3Z.png";
+                }
+            }
+		});
+        
+	</script>
+    <body>
+        <div class="mainWrapper">
+            <div class="topBox">
+                <form action="" id="nameForm">
+                    <input id="n" autocomplete="off" /><button>Set name</button>
+                </form>
+            </div>
+            
+            <div id="dropArea">
+                <ul id="messages"></ul>
+                <div class="bottomBox">
+                    <form action="" id="messageForm">
+                        <input id="m" autocomplete="off" autofocus />
+                    </form>
+                    <form action="" id="uploadFile">
+                        <input type="file" name="pic" accept="image/*"/>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <div class="sideBarWrapper">
+            <div class="userListContainer">
+                <h3>Users</h3>
+                <ul id="userList">
+                </ul>
+            </div>
+        </div>
+            
+    </body>
+</html>
